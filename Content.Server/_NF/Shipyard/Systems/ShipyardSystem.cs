@@ -19,6 +19,8 @@ using Robust.Shared.Containers;
 using Content.Server._NF.Station.Components;
 using Robust.Shared.EntitySerialization.Systems;
 using Robust.Shared.Utility;
+using Robust.Shared.GameObjects;
+using Content.Server._Scav.Persistence;
 
 namespace Content.Server._NF.Shipyard.Systems;
 
@@ -33,6 +35,7 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
     [Dependency] private readonly MetaDataSystem _metaData = default!;
     [Dependency] private readonly MapSystem _map = default!;
     [Dependency] private readonly SharedTransformSystem _transform = default!;
+    [Dependency] private readonly ShuttlePersistenceSystem _shuttlePersistence = default!;
 
     public MapId? ShipyardMap { get; private set; }
     private float _shuttleIndex;
@@ -169,6 +172,9 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
         _shuttleIndex += grid.Value.Comp.LocalAABB.Width + ShuttleSpawnBuffer;
 
         shuttleGrid = grid.Value.Owner;
+
+        _shuttlePersistence.RecursiveGridReInit(shuttleGrid.Value); // Scav
+
         return true;
     }
 
@@ -182,6 +188,40 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
     {
         ShipyardSaleResult result = new ShipyardSaleResult();
         bill = 0;
+
+        result = PreSaleShuttleCheck(stationUid, shuttleUid, consoleUid);
+
+        //just yeet and delete for now. Might want to split it into another function later to send back to the shipyard map first to pause for something
+        //also superman 3 moment
+        if (_station.GetOwningStation(shuttleUid) is { Valid: true } shuttleStationUid)
+        {
+            _station.DeleteStation(shuttleStationUid);
+        }
+
+        if (TryComp<ShipyardConsoleComponent>(consoleUid, out var comp))
+        {
+            CleanGrid(shuttleUid, consoleUid);
+        }
+
+        bill = (int)_pricing.AppraiseGrid(shuttleUid, LacksPreserveOnSaleComp);
+        QueueDel(shuttleUid);
+        _sawmill.Info($"Sold shuttle {shuttleUid} for {bill}");
+
+        // Update all record UI (skip records, no new records)
+        _shuttleRecordsSystem.RefreshStateForAll(true);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Checks a shuttle to make sure that it is docked to the given station, and that there are no lifeforms aboard. The check portion formerly part of TrySellShuttle, split out for use elsewhere.
+    /// </summary>
+    /// <param name="stationUid">The ID of the station that the shuttle is docked to</param>
+    /// <param name="shuttleUid">The grid ID of the shuttle to be appraised and sold</param>
+    /// <param name="consoleUid">The ID of the console being used to sell the ship</param>
+    public ShipyardSaleResult PreSaleShuttleCheck(EntityUid stationUid, EntityUid shuttleUid, EntityUid consoleUid)
+    {
+        ShipyardSaleResult result = new ShipyardSaleResult();
 
         if (!TryComp<StationDataComponent>(stationUid, out var stationGrid)
             || !HasComp<ShuttleComponent>(shuttleUid)
@@ -237,30 +277,11 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
             return result;
         }
 
-        //just yeet and delete for now. Might want to split it into another function later to send back to the shipyard map first to pause for something
-        //also superman 3 moment
-        if (_station.GetOwningStation(shuttleUid) is { Valid: true } shuttleStationUid)
-        {
-            _station.DeleteStation(shuttleStationUid);
-        }
-
-        if (TryComp<ShipyardConsoleComponent>(consoleUid, out var comp))
-        {
-            CleanGrid(shuttleUid, consoleUid);
-        }
-
-        bill = (int)_pricing.AppraiseGrid(shuttleUid, LacksPreserveOnSaleComp);
-        QueueDel(shuttleUid);
-        _sawmill.Info($"Sold shuttle {shuttleUid} for {bill}");
-
-        // Update all record UI (skip records, no new records)
-        _shuttleRecordsSystem.RefreshStateForAll(true);
-
         result.Error = ShipyardSaleError.Success;
         return result;
     }
 
-    private void CleanGrid(EntityUid grid, EntityUid destination)
+    public void CleanGrid(EntityUid grid, EntityUid destination) // Scav: made public
     {
         var xform = Transform(grid);
         var enumerator = xform.ChildEnumerator;

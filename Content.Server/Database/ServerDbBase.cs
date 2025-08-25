@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Content.Shared._Scav._Shipyard;
 using Content.Server.Administration.Logs;
 using Content.Server.Administration.Managers;
 using Content.Shared.Administration.Logs;
@@ -184,6 +185,21 @@ namespace Content.Server.Database
             var prefs = await db.Preference.SingleAsync(p => p.UserId == userId.UserId);
             prefs.SelectedCharacterSlot = newSlot;
         }
+
+        // Scav
+        public async Task<Profile> GetUserCurrentProfileFromPrefs(NetUserId userId) //Afaik there will always be at least one profile per user, if theres ever a time this isnt true this might cause a crash due to not expecting null value
+        {
+            await using var db = await GetDb();
+
+            var profile = await db.DbContext.Profile
+                .Include(p => p.Preference)
+                .Where(p => p.Preference.UserId == userId)
+                .SingleAsync(p => p.Preference.SelectedCharacterSlot == p.Slot);
+
+            return profile;
+        }
+
+        // End Scav
 
         private static HumanoidCharacterProfile ConvertProfiles(Profile profile)
         {
@@ -1857,6 +1873,87 @@ INSERT INTO player_round (players_id, rounds_id) VALUES ({players[player]}, {id}
             await db.DbContext.SaveChangesAsync();
             return true;
         }
+
+        #endregion
+
+        #region Ships
+        public async Task<int> RegisterShip(Guid ShipId, string shipName, string shipNameSuffix, NetUserId userId, string? filePath, string? fallbackFilePath)
+        {
+            await using var db = await GetDb();
+
+            var shipEntry = new Ship
+            {
+                ShipId = ShipId,
+                ShipName = shipName,
+                ShipNameSuffix = shipNameSuffix,
+                FilePath = filePath ?? "",
+                FallbackFilePath = fallbackFilePath ?? ""
+            };
+            var ownerProfile = await GetUserCurrentProfileFromPrefs(userId);
+            shipEntry.Profiles.Add(ownerProfile);
+
+            db.DbContext.Profile.Attach(ownerProfile);
+            db.DbContext.Ship.Add(shipEntry);
+            await db.DbContext.SaveChangesAsync();
+
+            return shipEntry.Id;
+        }
+
+        public async Task<bool> UpdateShip(Guid shipId, string shipName, string shipNameSuffix, string? filePath) //this wont update users but oh well, honestly probably better to handle those separately anyhow
+        {
+            await using var db = await GetDb();
+
+            var record = db.DbContext.Ship.SingleOrDefault(s => s.ShipId == shipId);
+            if (record != null)
+            {
+                record.ShipName = shipName;
+                record.ShipNameSuffix = shipNameSuffix;
+                record.FilePath = filePath ?? record.FilePath;
+
+                await db.DbContext.SaveChangesAsync();
+                return true;
+            }
+            return false;
+        }
+
+        public async Task<List<Ship>> GetShips()
+        {
+            await using var db = await GetDb();
+
+            var ships = db.DbContext.Ship.Where(s => s.Profiles.Any()).ToList();
+
+            return ships;
+        }
+
+        public async Task<List<ShipData>> GetShipData()
+        {
+            await using var db = await GetDb();
+
+            var ships = db.DbContext.Ship
+                .Select(p => new ShipData
+            {
+                ShipId = p.ShipId,
+                ShipName = p.ShipName,
+                ShipNameSuffix = p.ShipNameSuffix,
+                FilePath = p.FilePath,
+                ProfileData = p.Profiles.Select(pr => new ProfileIdentifier {UserId = pr.Preference.UserId, Slot = pr.Slot}).ToList()
+            })
+                .ToList();
+
+            return ships;
+        }
+
+
+        public async Task<List<Ship>> GetShipsByUser(NetUserId userId)
+        {
+            var profile = await GetUserCurrentProfileFromPrefs(userId);
+            await using var db = await GetDb();
+
+            var ships = db.DbContext.Ship.Where(s => s.Profiles.Any(p => p.Id == profile.Id)).ToList();
+
+            return ships;
+        }
+
 
         #endregion
 

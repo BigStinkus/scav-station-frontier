@@ -2,7 +2,7 @@
 shipyard-console-invalid-vessel = Cannot purchase vessel:
 shipyard-console-menu-title = Shipyard Menu
 shipyard-console-menu-listing-free = Free
-shipyard-console-docking = {$owner} shuttle {$vessel} en route.
+shipyard-console-docking = Shuttle {$vessel} en route, purchased by {$owner}
 shipyard-console-leaving = {$owner} shuttle {$vessel} sold by {$player}.
 shipyard-console-docking-secret = Unregistered vessel detected entering your sector.
 shipyard-console-leaving-secret = Unregistered vessel detected leaving your sector.
@@ -22,6 +22,7 @@ shipyard-console-deed-label = Registered Ship:
 shipyard-console-appraisal-label = Shuttle Resale Value:{" "}
 shipyard-console-no-voucher-redemptions = All voucher redemptions have been used.
 shipyard-console-invalid-voucher-type = This voucher cannot be used at this console.
+shipyard-console-sale-persistent-shuttle = Ship cannot be sold because it is registered to the garage.
 
 shipyard-console-contraband-onboard = Smuggled contraband detected onboard.
 shipyard-console-station-resources = Vital station resources detected onboard.

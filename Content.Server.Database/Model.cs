@@ -46,6 +46,7 @@ namespace Content.Server.Database
         public DbSet<RoleWhitelist> RoleWhitelists { get; set; } = null!;
         public DbSet<BanTemplate> BanTemplate { get; set; } = null!;
         public DbSet<IPIntelCache> IPIntelCache { get; set; } = null!;
+        public DbSet<Ship> Ship { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -424,6 +425,7 @@ namespace Content.Server.Database
 
         public int PreferenceId { get; set; }
         public Preference Preference { get; set; } = null!;
+        public List<Ship> Ships { get; } = [];
     }
 
     public class Job
@@ -461,6 +463,20 @@ namespace Content.Server.Database
         public int ProfileId { get; set; }
 
         public string TraitName { get; set; } = null!;
+    }
+
+    [Table("ship")]
+    public class Ship
+    {
+        public int Id { get; set; }
+        public Guid ShipId { get; set; } //No way to get Ids in code after insert so need some other unique identifier
+        public string ShipName { get; set; } = null!;
+        public string ShipNameSuffix { get; set; } = null!;
+        public List<Profile> Profiles { get; } = [];
+        public string FilePath { get; set; } = null!;
+        public string FallbackFilePath { get; set; } = null!;
+        public byte Size { get; set; } //This will be converted to a VesselSize enum in practice. A value of 0 will be treated as invalid
+
     }
 
     #region Loadouts

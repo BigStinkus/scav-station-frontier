@@ -33,6 +33,7 @@ using Content.Shared.Preferences;
 using Content.Server.Shuttles.Components;
 using Content.Server._NF.Station.Components;
 using System.Text.RegularExpressions;
+using Content.Server._Scav.Persistence;
 using Content.Shared.UserInterface;
 using Robust.Shared.Audio.Systems;
 using Content.Shared.Access;
@@ -361,6 +362,13 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
             return;
         }
 
+        if (TryComp<ShuttlePersistenceTrackerComponent>(shuttleUid, out _))
+        {
+            ConsolePopup(player, Loc.GetString("shipyard-console-sale-persistent-shuttle"));
+            PlayDenySound(player, uid, component);
+            return;
+        }
+
         if (_station.GetOwningStation(shuttleUid) is { Valid: true } shuttleStation
             && TryComp<StationRecordKeyStorageComponent>(targetId, out var keyStorage)
             && keyStorage.Key != null
@@ -647,7 +655,7 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
     /// <param name="disableSaleQuery">A query to get any marked objects from an entity</param>
     /// <param name="xformQuery">A query to get the transform component of an entity</param>
     /// <returns>The reason that a shuttle should be blocked from sale, null otherwise.</returns>
-    public string? FindDisableShipyardSaleObjects(EntityUid shuttle, ShipyardConsoleUiKey key, EntityQuery<ShipyardSellConditionComponent> disableSaleQuery, EntityQuery<TransformComponent> xformQuery)
+    public string? FindDisableShipyardSaleObjects(EntityUid shuttle, ShipyardConsoleUiKey? key, EntityQuery<ShipyardSellConditionComponent> disableSaleQuery, EntityQuery<TransformComponent> xformQuery)
     {
         var xform = xformQuery.GetComponent(shuttle);
         var childEnumerator = xform.ChildEnumerator;
@@ -656,7 +664,7 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
         {
             if (disableSaleQuery.TryGetComponent(child, out var disableSale)
                 && disableSale.BlockSale is true
-                && !disableSale.AllowedShipyardTypes.Contains(key))
+                && (key == null || !disableSale.AllowedShipyardTypes.Contains(key.Value))) // Scav: made ShipyardConsoleUiKey optional (also made it nullable in function params)
             {
                 return disableSale.Reason ?? "shipyard-console-fallback-prevent-sale";
             }
@@ -784,7 +792,7 @@ public sealed partial class ShipyardSystem : SharedShipyardSystem
     }
 
     #region Deed Assignment
-    void AssignShuttleDeedProperties(Entity<ShuttleDeedComponent> deed, EntityUid? shuttleUid, string? shuttleName, string? shuttleOwner, bool purchasedWithVoucher)
+    public void AssignShuttleDeedProperties(Entity<ShuttleDeedComponent> deed, EntityUid? shuttleUid, string? shuttleName, string? shuttleOwner, bool purchasedWithVoucher)
     {
         deed.Comp.ShuttleUid = shuttleUid;
         TryParseShuttleName(deed.Comp, shuttleName!);
