@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using Content.Shared._Scav._Shipyard;
 using Content.Server._NF.Shipyard.Systems;
@@ -38,6 +39,7 @@ using Content.Shared._Scav.Persistence;
 using Content.Server.Access.Systems;
 using Content.Server.Administration.Logs;
 using Content.Server.Chat.Systems;
+using Content.Server.GameTicking;
 using Content.Server.Maps;
 using Content.Server.Preferences.Managers;
 using Content.Server.Radio.EntitySystems;
@@ -54,6 +56,7 @@ using Content.Shared.Mind.Components;
 using Content.Shared.Preferences;
 using Content.Shared.Radio;
 using Content.Shared.StationRecords;
+using Content.Shared.Warps;
 using Robust.Shared.Network;
 using Robust.Shared.Player;
 using Robust.Shared.Prototypes;
@@ -81,6 +84,7 @@ public sealed partial class GarageSystem : SharedGarageSystem
     [Dependency] private readonly ChatSystem _chat = default!;
     [Dependency] private readonly AccessSystem _accessSystem = default!;
     [Dependency] private readonly StationRecordsSystem _records = default!;
+    [Dependency] private readonly SharedTransformSystem _transform = default!;
 
     public List<ShipData> Ships = new List<ShipData>(); //local copy of the ships stored in the database, to avoid database async annoyances. Also tracks the current guid of active ships
 
@@ -93,13 +97,54 @@ public sealed partial class GarageSystem : SharedGarageSystem
         SubscribeLocalEvent<GarageConsoleComponent, GarageConsoleRetrieveMessage>(OnRetrieveMessage);
         SubscribeLocalEvent<GarageConsoleComponent, EntInsertedIntoContainerMessage>(OnItemSlotChanged);
         SubscribeLocalEvent<GarageConsoleComponent, EntRemovedFromContainerMessage>(OnItemSlotChanged);
+        SubscribeLocalEvent<GameRunLevelChangedEvent>(OnRunLevelChanged);
 
         RefreshShips();
+    }
+
+    private bool TryGetNearestWarp(EntityUid uid, [NotNullWhen(true)] out EntityUid? warp)
+    {
+        warp = null;
+        float? distance = null;
+        var warpQuery = EntityQueryEnumerator<GarageTeleportMarkerComponent>();
+        TryComp(uid, out TransformComponent? callerTransform);
+        while (warpQuery.MoveNext(out var warpUid, out var warpComponent))
+        {
+            if (TryComp(warpUid, out TransformComponent? warpTransform))
+            {
+                var newDistance = (_transform.GetMapCoordinates(warpTransform).Position - _transform.GetMapCoordinates(callerTransform!).Position).Length();
+                if (distance == null || newDistance < distance)
+                {
+                    warp = warpUid;
+                    distance = newDistance;
+                }
+            }
+        }
+
+        if (warp is null)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private async void RefreshShips()
     {
         Ships = await _db.GetShipData();
+    }
+
+    private void OnRunLevelChanged(GameRunLevelChangedEvent args)
+    {
+        switch (args.New)
+        {
+            case GameRunLevel.PostRound:
+                StoreAllShips();
+                break;
+            case GameRunLevel.PreRoundLobby:
+                RefreshShips();
+                break;
+        }
     }
 
     private void RefreshState(EntityUid uid, string? shipDeed, EntityUid? targetId, GarageConsoleUiKey uiKey, EntityUid player)
@@ -147,8 +192,6 @@ public sealed partial class GarageSystem : SharedGarageSystem
             }
         }
 
-        var voucherUsed = HasComp<ShipyardVoucherComponent>(targetId);
-
         var fullName = deed != null ? ShipyardSystem.GetFullName(deed) : null;
 
         RefreshState(uid, fullName, targetId, (GarageConsoleUiKey)args.UiKey, player);
@@ -195,6 +238,129 @@ public sealed partial class GarageSystem : SharedGarageSystem
                 player);
 
         }
+    }
+
+    private void StoreAllShips()
+    {
+        List<EntityUid?> persistentShips = new List<EntityUid?>();
+
+        var persistenceTrackerQuery = EntityQueryEnumerator<ShuttlePersistenceTrackerComponent>();
+        while (persistenceTrackerQuery.MoveNext(out var shuttleUid, out var persistence))
+        {
+            TryStoreShip(shuttleUid, persistence);
+            persistentShips.Add(shuttleUid);
+        }
+
+        var garageConsoleQuery = EntityQueryEnumerator<GarageConsoleComponent>();
+        while (garageConsoleQuery.MoveNext(out var consoleUid, out var component))
+        {
+            var targetId = component.TargetIdSlot.ContainerSlot?.ContainedEntity;
+
+            if (TryComp<ShuttleDeedComponent>(targetId, out var deed))
+            {
+                if (Deleted(deed!.ShuttleUid) || (deed!.ShuttleUid != null && persistentShips.Contains(deed.ShuttleUid))) //since entities might be queued for deletion but not yet deleted, need to check the list as well
+                {
+                    RemComp<ShuttleDeedComponent>(targetId!.Value);
+                    deed = null;
+                }
+            }
+
+            var fullName = deed != null ? ShipyardSystem.GetFullName(deed) : null;
+
+            if (!TryComp<ActivatableUIComponent>(consoleUid, out var uiComp) || uiComp.Key == null)
+                return;
+
+            var uiUsers = _ui.GetActors(consoleUid, uiComp.Key);
+
+            foreach (var user in uiUsers)
+            {
+                if (user is not { Valid: true } player)
+                    continue;
+
+                RefreshState(consoleUid,
+                    fullName,
+                    targetId,
+                    (GarageConsoleUiKey)uiComp.Key,
+                    player);
+
+            }
+        }
+    }
+
+    public bool TryStoreShip(EntityUid shuttleUid, ShuttlePersistenceTrackerComponent persistence)
+    {
+        if (String.IsNullOrEmpty(persistence.ShipGuid))
+        {
+            return false;
+        }
+        //station records? probably best practice but we dont know what station to transfer to
+
+        var shuttleName = ToPrettyString(shuttleUid);
+        var shuttleNetEntity = _entityManager.GetNetEntity(shuttleUid);
+
+        //this check already exists in presaleshuttlecheck, but need to repeat here to be safe
+        if (!HasComp<ShuttleComponent>(shuttleUid)
+            || !TryComp(shuttleUid, out TransformComponent? xform))
+        {
+            _adminLogger.Add(LogType.ShipYardUsage, LogImpact.Extreme, $"Save for shuttle grid {ToPrettyString(shuttleUid)} as ship {persistence.ShipGuid} failed: shuttle is invalid. Admin intervention is necessary.");
+            return false;
+        }
+        //presaleshuttlecheck also normally checks for organics at this stage, but they get teleported off by Clean if that check is skipped anyway.
+
+        if (TryGetNearestWarp(shuttleUid, out var warp))
+        {
+            _shipyardSystem.CleanGrid(shuttleUid, warp.Value);
+        }
+        else
+        {
+            _adminLogger.Add(LogType.ShipYardUsage, LogImpact.Extreme, $"Save for shuttle grid {ToPrettyString(shuttleUid)} failed because no garage clean warp points exist");
+            return false;
+        }
+
+        //checks are complete, start taking destructive actions
+        if (_station.GetOwningStation(shuttleUid) is { Valid: true } shuttleStationUid)
+        {
+            _station.DeleteStation(shuttleStationUid);
+        }
+
+        _docking.UndockDocks(shuttleUid);
+        RemComp<IFFComponent>(shuttleUid);
+        RemComp<NavMapComponent>(shuttleUid);
+        RemComp<ShuttleDeedComponent>(shuttleUid);
+        RemComp<StationMemberComponent>(shuttleUid);
+
+        if (!String.IsNullOrEmpty(persistence.ShipGuid))
+        {
+            var existingShipId = new Guid(persistence.ShipGuid);
+            var shipCacheIndex = Ships.FindIndex(s => s.ShipId == existingShipId);
+
+            var name = Ships[shipCacheIndex].ShipName;
+            var suffix = Ships[shipCacheIndex].ShipNameSuffix;
+
+            var filePath = "/ships/" + name + "_" + suffix + "_" + persistence.ShipGuid + ".yml";
+
+            var saveResult = _mapLoader.TrySaveGrid(shuttleUid, new ResPath(filePath));
+            if (!saveResult)
+            {
+                _adminLogger.Add(LogType.ShipYardUsage, LogImpact.Extreme, $"Save for shuttle grid {ToPrettyString(shuttleUid)} as ship {persistence.ShipGuid} failed. Admin intervention is necessary.");
+                return false;
+            }
+
+            Ships[shipCacheIndex] = new ShipData { ShipId = existingShipId, ShipName = name, ShipNameSuffix = suffix, FilePath = filePath, ProfileData = Ships[shipCacheIndex].ProfileData, Active = false};
+            _db.UpdateShip(existingShipId, name, suffix, filePath);
+
+            _adminLogger.Add(LogType.ShipYardUsage, LogImpact.Medium, $"Ship {shuttleName} saved to the garage");
+        }
+
+        QueueDel(shuttleUid);
+
+        _shuttleRecordsSystem.RefreshStateForAll(true);
+        _shuttleRecordsSystem.TrySetSaleTime(shuttleNetEntity);
+
+        //will existing deeds be a problem? in testing it seems like it wipes them automatically
+
+        //also, might want to do something with active menus, maybe disable them?
+        return true;
     }
 
     public void OnStoreMessage(EntityUid uid, GarageConsoleComponent component, GarageConsoleStoreMessage args)
@@ -281,7 +447,7 @@ public sealed partial class GarageSystem : SharedGarageSystem
             _station.DeleteStation(shuttleStationUid);
         }
 
-        _shipyardSystem.CleanGrid(shuttleUid, uid);
+        _shipyardSystem.CleanGrid(shuttleUid, TryGetNearestWarp(uid, out var warp) ? warp.Value : uid);
 
         var name = deed.ShuttleName;
         var suffix = deed.ShuttleNameSuffix;
@@ -306,13 +472,13 @@ public sealed partial class GarageSystem : SharedGarageSystem
                 if (!saveResult)
                 {
                     ConsolePopup(player, Loc.GetString("garage-console-save-error")); //suffice it to say, if this happens, thats catastrophically bad, we've already deleted a bunch of stuff...
-                    _adminLogger.Add(LogType.ShipYardUsage, LogImpact.High, $"{ToPrettyString(player):actor} failed to save shuttle grid {ToPrettyString(shuttleUid)} as existing ship {persistence.ShipGuid} via {ToPrettyString(uid)}. Admin intervention is likely necessary.");
+                    _adminLogger.Add(LogType.ShipYardUsage, LogImpact.Extreme, $"{ToPrettyString(player):actor} failed to save shuttle grid {ToPrettyString(shuttleUid)} as existing ship {persistence.ShipGuid} via {ToPrettyString(uid)}. Admin intervention is likely necessary.");
                     PlayDenySound(player, uid, component);
                     return;
                 }
 
                 var i = Ships.FindIndex(s => s.ShipId == existingShipId);
-                Ships[i] = new ShipData { ShipId = existingShipId, ShipName = name, ShipNameSuffix = suffix, FilePath = filePath, ProfileData = new List<ProfileIdentifier> { new ProfileIdentifier { UserId = userId!.Value.UserId, Slot = slot!.Value } }, Active = false};
+                Ships[i] = new ShipData { ShipId = existingShipId, ShipName = name, ShipNameSuffix = suffix, FilePath = filePath, ProfileData = Ships[i].ProfileData, Active = false};
                 _db.UpdateShip(existingShipId, name, suffix, filePath);
 
                 SendStoreMessage(uid, deed.ShuttleOwner, name + " " + suffix, component.ShipyardChannel, player);
@@ -327,7 +493,7 @@ public sealed partial class GarageSystem : SharedGarageSystem
                 if (!saveResult)
                 {
                     ConsolePopup(player, Loc.GetString("garage-console-save-error")); //suffice it to say, if this happens, thats catastrophically bad, we've already deleted a bunch of stuff...
-                    _adminLogger.Add(LogType.ShipYardUsage, LogImpact.High, $"{ToPrettyString(player):actor} failed to save shuttle grid {ToPrettyString(shuttleUid)} via {ToPrettyString(uid)}. Admin intervention is likely necessary.");
+                    _adminLogger.Add(LogType.ShipYardUsage, LogImpact.Extreme, $"{ToPrettyString(player):actor} failed to save shuttle grid {ToPrettyString(shuttleUid)} via {ToPrettyString(uid)}. Admin intervention is likely necessary.");
                     PlayDenySound(player, uid, component);
                     return;
                 }
