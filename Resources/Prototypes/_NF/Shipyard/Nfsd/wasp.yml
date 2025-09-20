@@ -2,7 +2,7 @@
   id: Wasp
   parent: BaseVessel
   name: NSF Wasp
-  description: A large expedition oriented ship for holding prisoners and making them work planetside.
+  description: A large capital ship for holding prisoners and making them work planetside.
   price: 135000
   category: Large
   group: Security
@@ -12,7 +12,7 @@
   class:
   - Capital
   - Detainment
-  - Expedition
+  # Scav: no longer expedition
   engine:
   - AME
 
@@ -23,7 +23,7 @@
   minPlayers: 0
   stations:
     Wasp:
-      stationProto: StandardFrontierExpeditionVessel
+      stationProto: StandardFrontierVessel # Scav: no longer expeditionary
       components:
         - type: StationNameSetup
           mapNameTemplate: 'Wasp {1}'
